@@ -147,23 +147,6 @@ std::string fmtTemp(s32 mc) {
     return buf;
 }
 
-// SoC temperature. The plain ts commands were removed on newer firmware,
-// so prefer the session API and fall back to the old call.
-TsSession g_socSession;
-bool g_socSessionOk = false;
-
-bool readSocMilliC(s32* out_mc) {
-    if (g_socSessionOk) {
-        float t = 0.0f;
-        if (R_SUCCEEDED(tsSessionGetTemperature(&g_socSession, &t))) {
-            *out_mc = (s32)(t * 1000.0f);
-            return true;
-        }
-        return false;
-    }
-    return R_SUCCEEDED(tsGetTemperatureMilliC(TsLocation_External, out_mc));
-}
-
 } // namespace
 
 class GuiMain : public tsl::Gui {
@@ -175,10 +158,8 @@ public:
         auto list = new tsl::elm::List();
 
         list->addItem(new tsl::elm::CategoryHeader("Live"));
-        m_soc  = new tsl::elm::ListItem("SoC");
         m_skin = new tsl::elm::ListItem("Skin");
         m_fan  = new tsl::elm::ListItem("Fan");
-        list->addItem(m_soc);
         list->addItem(m_skin);
         list->addItem(m_fan);
 
@@ -238,8 +219,7 @@ public:
         // Refresh about once a second (the overlay runs at ~60 fps).
         if (m_frames++ % 60 != 0)
             return;
-        s32 soc = 0, skin = 0;
-        m_soc->setValue(readSocMilliC(&soc) ? fmtTemp(soc) : "n/a");
+        s32 skin = 0;
         m_skin->setValue(R_SUCCEEDED(tcGetSkinTemperatureMilliC(&skin)) ? fmtTemp(skin) : "n/a");
         bool ok;
         int duty = readFanDuty(ok);
@@ -249,7 +229,7 @@ public:
 private:
     Settings m_settings;
     u32 m_frames = 0;
-    tsl::elm::ListItem *m_soc = nullptr, *m_skin = nullptr, *m_fan = nullptr;
+    tsl::elm::ListItem *m_skin = nullptr, *m_fan = nullptr;
     tsl::elm::ListItem *m_source = nullptr, *m_minDuty = nullptr;
 };
 
@@ -259,18 +239,10 @@ public:
         // libtesla opens the fs service but does not mount the SD card;
         // without this, fopen fails and mkdir crashes the overlay loader.
         fsdevMountSdmc();
-        tsInitialize();
         tcInitialize();
-        // Harmless failure on firmware without the session API.
-        g_socSessionOk = R_SUCCEEDED(tsOpenSession(&g_socSession, TsDeviceCode_LocationExternal));
     }
     virtual void exitServices() override {
-        if (g_socSessionOk) {
-            tsSessionClose(&g_socSession);
-            g_socSessionOk = false;
-        }
         tcExit();
-        tsExit();
         fsdevUnmountDevice("sdmc");
     }
     virtual std::unique_ptr<tsl::Gui> loadInitialGui() override {
