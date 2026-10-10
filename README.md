@@ -29,9 +29,12 @@ Custom fan curve for modded Nintendo Switch / Switch Lite — a background sysmo
 
 ## Install
 
-1. Copy the contents of `dist/sd/` to the root of your SD card (merge folders).
-2. Reboot the console.
-3. Open the Tesla menu (`L + D-pad Down + R-stick click`) → **FujinNX**.
+1. Download `FujinNX-vX.Y.Z.zip` from the [latest release](https://github.com/krisnapradyana/FujinNX/releases/latest).
+2. Copy the contents of its `sd/` folder to the root of your SD card (merge folders).
+3. Reboot the console.
+4. Open the Tesla menu (`L + D-pad Down + R-stick click`) → **FujinNX**.
+
+(Building from source instead? `build.ps1` / `make` produce the same layout in `dist/sd/`.)
 
 The sysmodule starts automatically at boot (`boot2.flag`).
 
