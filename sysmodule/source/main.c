@@ -25,6 +25,12 @@ static const u32 PM_DEPENDENCIES[] = {
     PscPmModuleId_Fan, PscPmModuleId_Tc, PscPmModuleId_I2c, PscPmModuleId_Pwm,
 };
 
+static bool g_i2c_ok = false;
+
+// Latest raw sensor readings, as text, for status.txt.
+static char g_soc_line[40] = "soc=n/a";
+static char g_skin_line[40] = "skin=n/a";
+
 typedef enum { SRC_SOC, SRC_SKIN, SRC_MAX } TempSource;
 
 typedef struct {
@@ -91,12 +97,16 @@ void __appInit(void)
     rc = pscmInitialize();
     if (R_FAILED(rc))
         diagAbortWithResult(rc);
+    // Direct sensor access for the SoC temperature; optional, ts is the fallback.
+    g_i2c_ok = R_SUCCEEDED(i2cInitialize());
 
     smExit();
 }
 
 void __appExit(void)
 {
+    if (g_i2c_ok)
+        i2cExit();
     pscmExit();
     fanExit();
     tsExit();
@@ -242,8 +252,55 @@ static void write_status(int temp_mc, int duty, const char* state)
     FILE* f = fopen(STATUS_PATH, "w");
     if (!f)
         return;
-    fprintf(f, "duty=%d\ntemp_mc=%d\nstate=%s\n", duty, temp_mc, state);
+    fprintf(f, "duty=%d\ntemp_mc=%d\nstate=%s\n%s\n%s\n", duty, temp_mc, state, g_soc_line, g_skin_line);
     fclose(f);
+}
+
+// The SoC temperature comes from the TI TMP451 chip. The ts service that
+// wraps it has changed across firmware versions, so read the chip directly
+// over I2C the way Status Monitor does (register map from CTCaer's driver).
+#define TMP451_SOC_TEMP_REG     0x01
+#define TMP451_SOC_TEMP_DEC_REG 0x10
+
+static Result tmp451_read_reg(u8 reg, u8* out)
+{
+    struct {
+        u8 send;
+        u8 send_len;
+        u8 send_data;
+        u8 receive;
+        u8 receive_len;
+    } cmd = {
+        .send        = 0 | (I2cTransactionOption_Start << 6),
+        .send_len    = 1,
+        .send_data   = reg,
+        .receive     = 1 | (I2cTransactionOption_All << 6),
+        .receive_len = 1,
+    };
+    I2cSession s;
+    Result rc = i2cOpenSession(&s, I2cDevice_Tmp451);
+    if (R_FAILED(rc))
+        return rc;
+    u8 val = 0;
+    rc = i2csessionExecuteCommandList(&s, &val, sizeof(val), &cmd, sizeof(cmd));
+    i2csessionClose(&s);
+    if (R_SUCCEEDED(rc))
+        *out = val;
+    return rc;
+}
+
+static Result tmp451_soc_milli_c(s32* out_mc)
+{
+    u8 integer = 0, dec = 0;
+    Result rc = tmp451_read_reg(TMP451_SOC_TEMP_REG, &integer);
+    if (R_FAILED(rc))
+        return rc;
+    rc = tmp451_read_reg(TMP451_SOC_TEMP_DEC_REG, &dec);
+    if (R_FAILED(rc))
+        return rc;
+    // Upper 4 bits of the decimal register are sixteenths of a degree.
+    *out_mc = (s32)integer * 1000 + ((s32)(dec >> 4) * 625) / 10;
+    return rc;
 }
 
 static time_t file_mtime(const char* path)
@@ -257,18 +314,38 @@ static void set_fan(FanController* fan, int duty)
     fanControllerSetRotationSpeedLevel(fan, clampi(duty, 0, 100) / 100.0f);
 }
 
-// Reads the SoC temperature in milli-C, using whichever ts API this firmware has.
+// Reads the SoC temperature in milli-C: TMP451 over I2C first, then whichever
+// ts API this firmware has. Records the reading (or the error) for status.txt.
 static bool read_soc_milli_c(TsSession* session, bool session_ok, s32* out_mc)
 {
-    if (session_ok) {
-        float t = 0.0f;
-        if (R_SUCCEEDED(tsSessionGetTemperature(session, &t))) {
-            *out_mc = (s32)(t * 1000.0f);
-            return true;
+    Result rc = 1;
+    if (g_i2c_ok)
+        rc = tmp451_soc_milli_c(out_mc);
+    if (R_FAILED(rc)) {
+        if (session_ok) {
+            float t = 0.0f;
+            rc = tsSessionGetTemperature(session, &t);
+            if (R_SUCCEEDED(rc))
+                *out_mc = (s32)(t * 1000.0f);
+        } else {
+            rc = tsGetTemperatureMilliC(TsLocation_External, out_mc);
         }
-        return false;
     }
-    return R_SUCCEEDED(tsGetTemperatureMilliC(TsLocation_External, out_mc));
+    if (R_SUCCEEDED(rc))
+        snprintf(g_soc_line, sizeof(g_soc_line), "soc=%d", (int)*out_mc);
+    else
+        snprintf(g_soc_line, sizeof(g_soc_line), "soc=err 0x%x", rc);
+    return R_SUCCEEDED(rc);
+}
+
+static bool read_skin_milli_c(s32* out_mc)
+{
+    Result rc = tcGetSkinTemperatureMilliC(out_mc);
+    if (R_SUCCEEDED(rc))
+        snprintf(g_skin_line, sizeof(g_skin_line), "skin=%d", (int)*out_mc);
+    else
+        snprintf(g_skin_line, sizeof(g_skin_line), "skin=err 0x%x", rc);
+    return R_SUCCEEDED(rc);
 }
 
 int main(int argc, char* argv[])
@@ -314,6 +391,7 @@ int main(int argc, char* argv[])
     int cur = 100;          // start high until we have a reading
     int last_written = -1;
     int last_temp_written = -1000000;
+    s32 last_soc_written = -1000000, last_skin_written = -1000000;
     bool suspended = false; // true between "going to sleep" and "awake"
     u64 tick = 0;
 
@@ -370,7 +448,7 @@ int main(int argc, char* argv[])
 
         s32 soc = 0, skin = 0;
         bool ok_soc = read_soc_milli_c(&soc_session, soc_session_ok, &soc);
-        bool ok_skin = R_SUCCEEDED(tcGetSkinTemperatureMilliC(&skin));
+        bool ok_skin = read_skin_milli_c(&skin);
 
         int temp_mc = 0;
         bool have = false;
@@ -400,11 +478,16 @@ int main(int argc, char* argv[])
 
         set_fan(&fan, cur);
 
-        // Only touch the SD card when something meaningfully changed.
-        if (cur != last_written || (temp_mc - last_temp_written > 2000 || last_temp_written - temp_mc > 2000)) {
+        // Only touch the SD card when something meaningfully changed
+        // (duty, or either sensor moving by half a degree).
+        bool sensors_moved = (soc - last_soc_written > 500 || last_soc_written - soc > 500) ||
+                             (skin - last_skin_written > 500 || last_skin_written - skin > 500);
+        if (cur != last_written || sensors_moved) {
             write_status(temp_mc, cur, "awake");
             last_written = cur;
             last_temp_written = temp_mc;
+            last_soc_written = soc;
+            last_skin_written = skin;
         }
 
         tick++;

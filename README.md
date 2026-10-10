@@ -16,10 +16,12 @@ Custom fan curve for modded Nintendo Switch / Switch Lite — a background sysmo
 ## Features
 
 - **Custom temperature → fan curve** with linear interpolation between points
-- Reads both **SoC** and **skin** temperature; can follow either or the hotter of the two
+- Reads both **SoC** (TMP451 chip over I2C, with the `ts` service as fallback) and **skin** temperature; can follow either or the hotter of the two
+- **Simple mode**: set "fan starts at" and "100% fan at" in the overlay and get a straight line between them
 - **Asymmetric ramping** — spins up instantly, slows down gradually (no fan yo-yo)
 - **Failsafe**: fan forced to 100% if sensors can't be read or temperature exceeds a limit (default 75 °C)
-- **Tesla overlay** with live temps, fan %, curve presets (Quiet / Balanced / Cool / Max) and settings
+- **Sleep-aware**: registers with the console's power manager, hands the fan back to the OS while asleep and takes over again on wake
+- **Tesla overlay** with live temps, fan %, sysmodule state, curve presets (Quiet / Balanced / Cool / Max) and settings
 - Config hot-reload: edit `config.ini` (by hand or via the overlay) and it applies within ~2 seconds
 
 ## Requirements
@@ -56,7 +58,7 @@ failsafe_temp=75      ; at or above this the fan is forced to 100%
 45=100
 ```
 
-Live status is written to `sd:/config/fujinnx/status.txt`.
+Live status is written to `sd:/config/fujinnx/status.txt` (`duty`, `temp_mc`, `state` = awake/sleep, `soc`, `skin`).
 
 ## Building
 

@@ -14,7 +14,7 @@
 	"filesystem_access":	{
 		"permissions":	"0xffffffffffffffff"
 	},
-	"service_access":	["fsp-srv", "set:sys", "ts", "tc", "fan", "psc:m"],
+	"service_access":	["fsp-srv", "set:sys", "ts", "tc", "fan", "psc:m", "i2c"],
 	"service_host":	[],
 	"kernel_capabilities":	[{
 			"type":	"kernel_flags",
