@@ -14,6 +14,17 @@
 #define FAN_DEVICE_CODE 0x3D000001u
 #define MAX_POINTS 16
 
+// Our id with the power manager (psc). Must not collide with a real module;
+// 0x7B is unused by the OS and by known homebrew (sys-con uses 126).
+#define FUJIN_PM_MODULE_ID ((PscPmModuleId)0x7B)
+
+// Services whose hardware we talk to. Declaring them as dependencies makes
+// psc put us to sleep before them and wake us only after they are back up,
+// so we never send them IPC while their hardware is powered down.
+static const u32 PM_DEPENDENCIES[] = {
+    PscPmModuleId_Fan, PscPmModuleId_Tc, PscPmModuleId_I2c, PscPmModuleId_Pwm,
+};
+
 typedef enum { SRC_SOC, SRC_SKIN, SRC_MAX } TempSource;
 
 typedef struct {
@@ -77,12 +88,16 @@ void __appInit(void)
     rc = fanInitialize();
     if (R_FAILED(rc))
         diagAbortWithResult(rc);
+    rc = pscmInitialize();
+    if (R_FAILED(rc))
+        diagAbortWithResult(rc);
 
     smExit();
 }
 
 void __appExit(void)
 {
+    pscmExit();
     fanExit();
     tsExit();
     tcExit();
@@ -222,12 +237,12 @@ static int curve_duty(const Config* c, int temp_mc)
     return 100;
 }
 
-static void write_status(int temp_mc, int duty)
+static void write_status(int temp_mc, int duty, const char* state)
 {
     FILE* f = fopen(STATUS_PATH, "w");
     if (!f)
         return;
-    fprintf(f, "duty=%d\ntemp_mc=%d\n", duty, temp_mc);
+    fprintf(f, "duty=%d\ntemp_mc=%d\nstate=%s\n", duty, temp_mc, state);
     fclose(f);
 }
 
@@ -278,17 +293,72 @@ int main(int argc, char* argv[])
     config_load(&cfg);
     time_t cfg_mtime = file_mtime(CONFIG_PATH);
 
+    // Register with the power manager so we are told about sleep and wake.
+    // Without this we would keep calling fan/tc/ts mid-transition and stall
+    // the console on wake, so if it fails leave the OS in charge and stop.
+    PscPmModule pm;
+    rc = pscmGetPmModule(&pm, FUJIN_PM_MODULE_ID, PM_DEPENDENCIES,
+                         sizeof(PM_DEPENDENCIES) / sizeof(PM_DEPENDENCIES[0]), true);
+    if (R_FAILED(rc)) {
+        char msg[48];
+        snprintf(msg, sizeof(msg), "error psc 0x%x", rc);
+        write_status(0, 0, msg);
+        return 1;
+    }
+
     // Boot marker: lets the overlay distinguish "launched" from "never ran".
-    write_status(0, 100);
+    write_status(0, 100, "awake");
 
     tcDisableFanControl();
 
     int cur = 100;          // start high until we have a reading
     int last_written = -1;
     int last_temp_written = -1000000;
+    bool suspended = false; // true between "going to sleep" and "awake"
     u64 tick = 0;
 
     for (;;) {
+        // Wait up to one second for a power-state request; a timeout is our
+        // normal once-per-second tick.
+        if (R_SUCCEEDED(eventWait(&pm.event, 1000000000ULL))) {
+            PscPmState state;
+            u32 flags;
+            if (R_SUCCEEDED(pscPmModuleGetRequest(&pm, &state, &flags))) {
+                switch (state) {
+                case PscPmState_ReadySleep:
+                case PscPmState_ReadySleepCritical:
+                case PscPmState_ReadyShutdown:
+                    // Our dependencies are still awake here: hand the fan back
+                    // to the OS, then go quiet until we are woken.
+                    if (!suspended) {
+                        tcEnableFanControl();
+                        suspended = true;
+                        write_status(last_temp_written, cur, "sleep");
+                    }
+                    break;
+                case PscPmState_ReadyAwaken:
+                case PscPmState_Awake:
+                    // Dependencies are back up: take the fan over again.
+                    if (suspended) {
+                        tcDisableFanControl();
+                        suspended = false;
+                        write_status(last_temp_written, cur, "awake");
+                    }
+                    break;
+                default:
+                    // ReadyAwakenCritical: only essential services are up yet.
+                    break;
+                }
+                // Every request must be acknowledged, or the transition stalls.
+                pscPmModuleAcknowledge(&pm, state);
+            }
+            continue;
+        }
+
+        // Asleep: no service calls, no SD access, nothing.
+        if (suspended)
+            continue;
+
         // Hot-reload the config when the overlay or the user changes it.
         if (tick % 2 == 0) {
             time_t m = file_mtime(CONFIG_PATH);
@@ -332,17 +402,18 @@ int main(int argc, char* argv[])
 
         // Only touch the SD card when something meaningfully changed.
         if (cur != last_written || (temp_mc - last_temp_written > 2000 || last_temp_written - temp_mc > 2000)) {
-            write_status(temp_mc, cur);
+            write_status(temp_mc, cur, "awake");
             last_written = cur;
             last_temp_written = temp_mc;
         }
 
-        svcSleepThread(1000000000ULL);
         tick++;
     }
 
     // Unreachable while running; kept so an early exit hands the fan back to the OS.
     tcEnableFanControl();
+    pscPmModuleFinalize(&pm);
+    pscPmModuleClose(&pm);
     if (soc_session_ok)
         tsSessionClose(&soc_session);
     fanControllerClose(&fan);

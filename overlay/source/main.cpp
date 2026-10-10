@@ -124,8 +124,10 @@ void saveSettingsKeepCurve(const Settings& s) {
     fclose(f);
 }
 
-int readFanDuty(bool& ok) {
+// Reads the sysmodule's status file. state is "awake", "sleep" or an error.
+int readFanDuty(bool& ok, std::string& state) {
     ok = false;
+    state.clear();
     FILE* f = fopen(STATUS_PATH, "r");
     if (!f)
         return 0;
@@ -135,6 +137,10 @@ int readFanDuty(bool& ok) {
         if (!strncmp(line, "duty=", 5)) {
             duty = atoi(line + 5);
             ok = true;
+        } else if (!strncmp(line, "state=", 6)) {
+            state = line + 6;
+            while (!state.empty() && (state.back() == '\n' || state.back() == '\r'))
+                state.pop_back();
         }
     }
     fclose(f);
@@ -160,8 +166,10 @@ public:
         list->addItem(new tsl::elm::CategoryHeader("Live"));
         m_skin = new tsl::elm::ListItem("Temp");
         m_fan  = new tsl::elm::ListItem("Fan");
+        m_state = new tsl::elm::ListItem("Sysmodule");
         list->addItem(m_skin);
         list->addItem(m_fan);
+        list->addItem(m_state);
 
         list->addItem(new tsl::elm::CategoryHeader("Curve preset (A to apply)"));
         for (const Preset& p : PRESETS) {
@@ -222,14 +230,16 @@ public:
         s32 skin = 0;
         m_skin->setValue(R_SUCCEEDED(tcGetSkinTemperatureMilliC(&skin)) ? fmtTemp(skin) : "n/a");
         bool ok;
-        int duty = readFanDuty(ok);
-        m_fan->setValue(ok ? std::to_string(duty) + " %" : "sysmodule not running");
+        std::string state;
+        int duty = readFanDuty(ok, state);
+        m_fan->setValue(ok ? std::to_string(duty) + " %" : "n/a");
+        m_state->setValue(!ok ? "not running" : (state.empty() ? "running" : state));
     }
 
 private:
     Settings m_settings;
     u32 m_frames = 0;
-    tsl::elm::ListItem *m_skin = nullptr, *m_fan = nullptr;
+    tsl::elm::ListItem *m_skin = nullptr, *m_fan = nullptr, *m_state = nullptr;
     tsl::elm::ListItem *m_source = nullptr, *m_minDuty = nullptr;
 };
 
