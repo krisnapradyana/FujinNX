@@ -1,0 +1,17 @@
+# Build artifacts
+build/
+*.elf
+*.nsp
+*.nso
+*.npdm
+*.nacp
+*.ovl
+*.map
+*.lst
+
+# Packaged SD layout (built by build.ps1; attach to releases instead)
+dist/
+
+# Editor/OS noise
+.vscode/
+Thumbs.db
