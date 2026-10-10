@@ -158,7 +158,7 @@ public:
         auto list = new tsl::elm::List();
 
         list->addItem(new tsl::elm::CategoryHeader("Live"));
-        m_skin = new tsl::elm::ListItem("Skin");
+        m_skin = new tsl::elm::ListItem("Temp");
         m_fan  = new tsl::elm::ListItem("Fan");
         list->addItem(m_skin);
         list->addItem(m_fan);
