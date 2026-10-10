@@ -147,6 +147,23 @@ std::string fmtTemp(s32 mc) {
     return buf;
 }
 
+// SoC temperature. The plain ts commands were removed on newer firmware,
+// so prefer the session API and fall back to the old call.
+TsSession g_socSession;
+bool g_socSessionOk = false;
+
+bool readSocMilliC(s32* out_mc) {
+    if (g_socSessionOk) {
+        float t = 0.0f;
+        if (R_SUCCEEDED(tsSessionGetTemperature(&g_socSession, &t))) {
+            *out_mc = (s32)(t * 1000.0f);
+            return true;
+        }
+        return false;
+    }
+    return R_SUCCEEDED(tsGetTemperatureMilliC(TsLocation_External, out_mc));
+}
+
 } // namespace
 
 class GuiMain : public tsl::Gui {
@@ -222,7 +239,7 @@ public:
         if (m_frames++ % 60 != 0)
             return;
         s32 soc = 0, skin = 0;
-        m_soc->setValue(R_SUCCEEDED(tsGetTemperatureMilliC(TsLocation_External, &soc)) ? fmtTemp(soc) : "n/a");
+        m_soc->setValue(readSocMilliC(&soc) ? fmtTemp(soc) : "n/a");
         m_skin->setValue(R_SUCCEEDED(tcGetSkinTemperatureMilliC(&skin)) ? fmtTemp(skin) : "n/a");
         bool ok;
         int duty = readFanDuty(ok);
@@ -244,8 +261,14 @@ public:
         fsdevMountSdmc();
         tsInitialize();
         tcInitialize();
+        // Harmless failure on firmware without the session API.
+        g_socSessionOk = R_SUCCEEDED(tsOpenSession(&g_socSession, TsDeviceCode_LocationExternal));
     }
     virtual void exitServices() override {
+        if (g_socSessionOk) {
+            tsSessionClose(&g_socSession);
+            g_socSessionOk = false;
+        }
         tcExit();
         tsExit();
         fsdevUnmountDevice("sdmc");
